@@ -1,0 +1,8 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.5
+reloadable = true
+
+[libraries]
+windows.debug.x86_64 = "res://addons/gdblive/GDBLive.windows.x86_64.dll"
+windows.release.x86_64 = "res://addons/gdblive/GDBLive.windows.x86_64.dll"
