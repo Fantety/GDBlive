@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![GDBLive Logo](icon.svg)
+<img src="icon.svg" width="200" height="200" alt="GDBLive Logo">
 
 **为 Godot 4 打造的 B站直播开放平台插件**
 
