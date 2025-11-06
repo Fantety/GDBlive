@@ -1,199 +1,380 @@
-# GDBLive - B站直播开放平台 Godot 扩展
+# GDBLive - B站直播开放平台 Godot 插件
 
-这是一个用于 Godot 4 的 GDExtension，实现了 B站直播开放平台的 API 和 WebSocket 长连接功能。
+<div align="center">
 
-## 功能特性
+![GDBLive Logo](icon.svg)
 
-### HTTP API 接口
+**为 Godot 4 打造的 B站直播开放平台插件**
 
-- ✅ `/v2/app/start` - 开启项目
-- ✅ `/v2/app/end` - 关闭项目
-- ✅ `/v2/app/heartbeat` - 项目心跳
-- ✅ `/v2/app/batchHeartbeat` - 项目批量心跳
+让你的 Godot 游戏轻松接入 B站直播互动功能
 
-### WebSocket 长连接
+[![Godot](https://img.shields.io/badge/Godot-4.x-blue.svg)](https://godotengine.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-- ✅ 自动鉴权（OP_AUTH）
-- ✅ 自动心跳维持（每 20 秒）
-- ✅ 协议包编码/解码
-- ✅ Zlib 压缩数据自动解压
-- ✅ 实时消息推送
-- ✅ 线程安全的信号发送
+</div>
 
-### 支持的消息类型
+---
 
-- 弹幕消息 (`LIVE_OPEN_PLATFORM_DM`)
-- 礼物消息 (`LIVE_OPEN_PLATFORM_SEND_GIFT`)
-- 醒目留言 (`LIVE_OPEN_PLATFORM_SUPER_CHAT`)
-- 上舰消息 (`LIVE_OPEN_PLATFORM_GUARD`)
-- 点赞消息 (`LIVE_OPEN_PLATFORM_LIKE`)
+## 📖 这是什么？
 
-## 编译
+GDBLive 是一个 Godot 4 插件，让你可以在游戏中接收 B站直播间的实时互动消息，包括：
 
-### Windows
+- 💬 **弹幕** - 观众发送的弹幕消息
+- 🎁 **礼物** - 观众赠送的礼物
+- 💰 **醒目留言** - SC（Super Chat）
+- ⚓ **上舰** - 观众购买舰长
+- � **数点赞** - 观众点赞
 
-```powershell
-# 开发版本
-.\build-dev.ps1
+### 可以用来做什么？
 
-# 或使用 bat 文件
-.\build-dev.bat
+- 🎮 **直播互动游戏** - 观众通过弹幕控制游戏角色
+- 📊 **数据可视化** - 实时展示礼物、SC 等数据
+- 🎪 **直播间小游戏** - 抽奖、投票、答题等
+- 🤖 **互动机器人** - 自动回复、数据统计等
 
-# 发布版本
-.\build.ps1
-# 或
-.\build.bat
-```
+---
 
-### 手动编译
+## 🚀 快速开始
 
-```bash
-cargo build --release
-```
+### 第一步：安装插件
 
-编译后的动态库会输出到 `demo/addons/gdblive/bin/` 目录。
+1. 从 [Releases](https://github.com/your-repo/releases) 下载最新版本
+2. 解压到你的 Godot 项目的 `addons/` 目录
+3. 在 Godot 编辑器中启用插件：`项目 → 项目设置 → 插件 → GDBLive`
 
-## 使用方法
+### 第二步：获取 API 凭证
 
-### 1. 基本设置
+1. 访问 [B站直播开放平台](https://open-live.bilibili.com/)
+2. 注册并创建应用
+3. 获取以下信息：
+   - **身份码**（code）
+   - **应用ID**（app_id）
+   - **密钥ID**（access_key_id）
+   - **密钥**（access_key_secret）
+
+### 第三步：编写代码
+
+创建一个脚本，复制以下代码：
 
 ```gdscript
 extends Node
 
 var blive: Blive
+var game_id: String = ""
 
 func _ready():
+    # 创建 Blive 节点
     blive = Blive.new()
     add_child(blive)
     
-    # 配置
-    blive.code = "your_code"
-    blive.app_id = "your_app_id"
-    blive.access_key_id = "your_access_key_id"
-    blive.access_key_secret = "your_access_key_secret"
-```
+    # 填入你的 API 凭证
+    blive.code = "你的身份码"
+    blive.app_id = "你的应用ID"
+    blive.access_key_id = "你的密钥ID"
+    blive.access_key_secret = "你的密钥"
+    
+    # 连接信号
+    blive.start_completed.connect(_on_start_completed)
+    blive.ws_message_received.connect(_on_ws_message_received)
+    
+    # 开启项目
+    blive.start()
 
-### 2. HTTP API 调用
-
-```gdscript
-# 连接信号
-blive.start_completed.connect(_on_start_completed)
-
-# 启动项目
-blive.start()
-
-func _on_start_completed(response_json: String):
-    var json = JSON.new()
-    json.parse(response_json)
-    var data = json.data
-    print(data)
-```
-
-### 3. WebSocket 连接
-
-```gdscript
-# 连接 WebSocket 信号
-blive.ws_connected.connect(_on_ws_connected)
-blive.ws_message_received.connect(_on_ws_message_received)
-
-# 从 start 接口获取 WebSocket 信息后启动
+# 项目开启成功后，连接 WebSocket
 func _on_start_completed(response_json: String):
     var json = JSON.new()
     json.parse(response_json)
     var data = json.data
     
     if data["code"] == 0:
+        # 保存场次ID
+        game_id = data["data"]["game_info"]["game_id"]
+        
+        # 获取 WebSocket 信息
         var ws_info = data["data"]["websocket_info"]
         var ws_url = ws_info["wss_link"][0]
         var auth_body = ws_info["auth_body"]
         
-        # 启动 WebSocket
+        # 连接 WebSocket
         blive.start_websocket(ws_url, auth_body)
+        
+        # 启动心跳（保持连接）
+        blive.start_heartbeat(game_id)
+        
+        print("✓ 连接成功！等待接收消息...")
 
+# 收到消息时触发
 func _on_ws_message_received(cmd: String, data_json: String):
-    print("收到消息: ", cmd)
-    print("内容: ", data_json)
+    var json = JSON.new()
+    json.parse(data_json)
+    var msg_data = json.data
+    
+    # 处理弹幕
+    if cmd == "LIVE_OPEN_PLATFORM_DM":
+        var dm = msg_data["data"]
+        var username = dm["uname"]
+        var message = dm["msg"]
+        print("💬 ", username, " 说：", message)
+    
+    # 处理礼物
+    elif cmd == "LIVE_OPEN_PLATFORM_SEND_GIFT":
+        var gift = msg_data["data"]
+        var username = gift["uname"]
+        var gift_name = gift["gift_name"]
+        var gift_num = gift["gift_num"]
+        print("🎁 ", username, " 送了 ", gift_num, " 个", gift_name)
+    
+    # 处理 SC
+    elif cmd == "LIVE_OPEN_PLATFORM_SUPER_CHAT":
+        var sc = msg_data["data"]
+        var username = sc["uname"]
+        var message = sc["message"]
+        var price = sc["rmb"]
+        print("💰 ", username, " 发送了 ¥", price, " 的 SC：", message)
+
+# 退出时清理资源
+func _exit_tree():
+    if blive:
+        blive.stop_websocket()
+        blive.stop_heartbeat()
+        if game_id != "":
+            blive.end(game_id)
 ```
 
-### 4. 完整示例
+### 第四步：运行测试
 
-查看 `demo/websocket_example.gd` 获取完整的使用示例。
+1. 运行你的 Godot 项目
+2. 在你的直播间发送弹幕
+3. 查看 Godot 控制台，应该能看到弹幕消息
 
-## API 文档
+---
 
-### 方法
+## 📚 API 参考
 
-#### `start()`
-开启项目，调用 `/v2/app/start` 接口。
+### 配置属性
 
-#### `end(game_id: String)`
-关闭项目，调用 `/v2/app/end` 接口。
+```gdscript
+blive.code = "你的身份码"
+blive.app_id = "你的应用ID"
+blive.access_key_id = "你的密钥ID"
+blive.access_key_secret = "你的密钥"
+```
 
-#### `heartbeat(game_id: String)`
-发送项目心跳，调用 `/v2/app/heartbeat` 接口。推荐每 20 秒调用一次。
+### 常用方法
 
-#### `batch_heartbeat(game_ids: Array[String])`
-批量发送项目心跳，调用 `/v2/app/batchHeartbeat` 接口。game_ids 数量要小于 200 条。
+#### 开启项目
+```gdscript
+blive.start()
+```
+调用后会触发 `start_completed` 信号，返回场次信息和 WebSocket 连接信息。
 
-#### `start_websocket(ws_url: String, auth_body: String)`
-启动 WebSocket 连接。
-- `ws_url`: WebSocket 服务器地址
-- `auth_body`: 鉴权字符串
+#### 关闭项目
+```gdscript
+blive.end(game_id)
+```
 
-#### `stop_websocket()`
-停止 WebSocket 连接。
+#### 连接 WebSocket
+```gdscript
+blive.start_websocket(ws_url, auth_body)
+```
+从 `start_completed` 信号中获取 `ws_url` 和 `auth_body`。
+
+#### 断开 WebSocket
+```gdscript
+blive.stop_websocket()
+```
+
+#### 启动心跳
+```gdscript
+blive.start_heartbeat(game_id)
+```
+每 20 秒自动发送一次心跳，保持连接。
+
+#### 停止心跳
+```gdscript
+blive.stop_heartbeat()
+```
 
 ### 信号
 
-#### HTTP API 信号
+#### start_completed(response_json: String)
+项目开启完成时触发。
 
-- `start_completed(response_json: String)` - start 请求完成
-- `end_completed(response_json: String)` - end 请求完成
-- `heartbeat_completed(response_json: String)` - heartbeat 请求完成
-- `batch_heartbeat_completed(response_json: String)` - batch_heartbeat 请求完成
+**响应数据结构：**
+```json
+{
+  "code": 0,
+  "data": {
+    "game_info": {
+      "game_id": "场次ID"
+    },
+    "websocket_info": {
+      "wss_link": ["WebSocket地址"],
+      "auth_body": "鉴权字符串"
+    },
+    "anchor_info": {
+      "uname": "主播昵称",
+      "room_id": 房间号
+    }
+  }
+}
+```
 
-#### WebSocket 信号
+#### ws_message_received(cmd: String, data_json: String)
+收到 WebSocket 消息时触发。
 
-- `ws_connected()` - WebSocket 连接成功
-- `ws_disconnected()` - WebSocket 连接断开
-- `ws_message_received(cmd: String, data_json: String)` - 收到消息
-- `ws_error(error_msg: String)` - 发生错误
+**消息类型（cmd）：**
+- `LIVE_OPEN_PLATFORM_DM` - 弹幕
+- `LIVE_OPEN_PLATFORM_SEND_GIFT` - 礼物
+- `LIVE_OPEN_PLATFORM_SUPER_CHAT` - SC
+- `LIVE_OPEN_PLATFORM_GUARD` - 上舰
+- `LIVE_OPEN_PLATFORM_LIKE` - 点赞
 
-## 技术细节
+**弹幕消息数据结构：**
+```json
+{
+  "cmd": "LIVE_OPEN_PLATFORM_DM",
+  "data": {
+    "uname": "用户昵称",
+    "uid": 123456,
+    "msg": "弹幕内容",
+    "fans_medal_level": 10,
+    "guard_level": 0
+  }
+}
+```
 
-### 协议实现
+**礼物消息数据结构：**
+```json
+{
+  "cmd": "LIVE_OPEN_PLATFORM_SEND_GIFT",
+  "data": {
+    "uname": "用户昵称",
+    "gift_name": "礼物名称",
+    "gift_num": 1,
+    "price": 100
+  }
+}
+```
 
-WebSocket 协议基于 B站直播开放平台的应用层协议：
+#### ws_connected()
+WebSocket 连接成功时触发。
 
-- 大端对齐的二进制协议
-- 支持 Zlib 压缩（Version=2）
-- 自动心跳维持（20 秒间隔）
-- 线程安全的消息处理
+#### ws_disconnected()
+WebSocket 断开连接时触发。
 
-### 线程模型
+#### ws_error(error_msg: String)
+WebSocket 发生错误时触发。
 
-WebSocket 连接在独立的系统线程中运行，使用 Tokio runtime 处理异步操作：
+---
 
-- 使用 `std::thread::spawn` 创建独立线程
-- 在线程中创建 Tokio runtime 并使用 `block_on` 运行异步任务
-- 通过 `mpsc` 通道与主线程通信
-- 注意：子线程中的 `godot_print!` 不会输出到 Godot 控制台
+## 💡 使用示例
 
-### 依赖
+### 示例 1：弹幕控制角色移动
 
-- `godot` - Godot 4 GDExtension 绑定
-- `reqwest` - HTTP 客户端
-- `tungstenite` - WebSocket 客户端
-- `flate2` - Zlib 解压
-- `byteorder` - 字节序处理
-- `md5`, `hmac`, `sha2` - 签名生成
+```gdscript
+func _on_ws_message_received(cmd: String, data_json: String):
+    if cmd == "LIVE_OPEN_PLATFORM_DM":
+        var json = JSON.new()
+        json.parse(data_json)
+        var dm = json.data["data"]
+        var message = dm["msg"]
+        
+        # 根据弹幕内容控制角色
+        if message == "左":
+            player.move_left()
+        elif message == "右":
+            player.move_right()
+        elif message == "跳":
+            player.jump()
+```
 
-## 许可证
+### 示例 2：礼物触发特效
 
-MIT License
+```gdscript
+func _on_ws_message_received(cmd: String, data_json: String):
+    if cmd == "LIVE_OPEN_PLATFORM_SEND_GIFT":
+        var json = JSON.new()
+        json.parse(data_json)
+        var gift = json.data["data"]
+        var gift_name = gift["gift_name"]
+        
+        # 根据礼物类型播放特效
+        if gift_name == "小心心":
+            play_heart_effect()
+        elif gift_name == "辣条":
+            play_fire_effect()
+```
 
-## 相关链接
+### 示例 3：SC 显示在屏幕上
+
+```gdscript
+func _on_ws_message_received(cmd: String, data_json: String):
+    if cmd == "LIVE_OPEN_PLATFORM_SUPER_CHAT":
+        var json = JSON.new()
+        json.parse(data_json)
+        var sc = json.data["data"]
+        
+        # 创建 SC 显示
+        var sc_label = Label.new()
+        sc_label.text = "%s: %s (¥%d)" % [sc["uname"], sc["message"], sc["rmb"]]
+        add_child(sc_label)
+        
+        # 3 秒后移除
+        await get_tree().create_timer(3.0).timeout
+        sc_label.queue_free()
+```
+
+### 完整示例
+
+查看 `demo/node_2d.gd` 获取包含所有功能的完整示例代码。
+
+---
+
+## 🐛 常见问题
+
+### 连接不上 WebSocket？
+
+1. 检查网络连接是否正常
+2. 确认 API 凭证是否正确
+3. 确认 `start()` 返回的 `code` 是否为 0
+4. 查看控制台的错误信息
+
+### 收不到消息？
+
+1. 确认 WebSocket 已连接（`ws_connected` 信号触发）
+2. 确认心跳正常运行（`start_heartbeat` 已调用）
+3. 在直播间发送测试弹幕
+4. 检查场次是否过期（20 分钟无心跳会自动关闭）
+
+### 如何调试？
+
+连接调试信号查看详细日志：
+
+```gdscript
+blive.ws_debug.connect(func(msg): print("[WS] ", msg))
+blive.heartbeat_debug.connect(func(msg): print("[心跳] ", msg))
+```
+
+---
+
+## 📄 许可证
+
+本项目采用 MIT 许可证。
+
+---
+
+## 🔗 相关链接
 
 - [B站直播开放平台文档](https://open-live.bilibili.com/document/)
-- [Godot Engine](https://godotengine.org/)
-- [godot-rust](https://godot-rust.github.io/)
+- [Godot Engine 官网](https://godotengine.org/)
+
+---
+
+<div align="center">
+
+**如果这个项目对你有帮助，请给个 ⭐ Star！**
+
+Made with ❤️ for Godot Community
+
+</div>
