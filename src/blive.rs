@@ -12,10 +12,22 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::Cursor;
 use flate2::read::ZlibDecoder;
 use std::io::Read;
-use tokio::sync::mpsc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
-use crate::runtime::RuntimeManager;
+// 线程消息类型（用于从子线程向主线程发送信号）
+#[derive(Clone)]
+enum ThreadMessage {
+    Signal { name: String, args: Vec<String> },
+}
+
+// 发送信号到主线程
+fn send_signal_to_main(tx: &mpsc::UnboundedSender<ThreadMessage>, signal_name: &str, args: Vec<String>) {
+    let _ = tx.send(ThreadMessage::Signal {
+        name: signal_name.to_string(),
+        args,
+    });
+}
 
 // WebSocket 操作码常量
 const OP_HEARTBEAT: u32 = 2;
@@ -44,10 +56,12 @@ struct Blive {
     access_key_secret: GString,
     #[export]
     api_base_url: GString,
-    
-    runtime: Option<Arc<RuntimeManager>>,
+
     ws_running: Arc<Mutex<bool>>,
-    ws_message_rx: Option<Arc<Mutex<mpsc::UnboundedReceiver<WsMessage>>>>,
+    
+    // 统一的线程消息通道
+    thread_message_rx: Option<Arc<Mutex<mpsc::UnboundedReceiver<ThreadMessage>>>>,
+    thread_message_tx: Option<mpsc::UnboundedSender<ThreadMessage>>,
     
     // API 心跳相关
     heartbeat_running: Arc<Mutex<bool>>,
@@ -60,14 +74,7 @@ struct Blive {
     base: Base<Node>
 }
 
-// WebSocket 消息类型
-enum WsMessage {
-    Connected,
-    Disconnected,
-    Message { cmd: String, data: String },
-    Error(String),
-    Debug(String), // 调试日志
-}
+
 
 #[godot_api]
 impl INode for Blive{
@@ -75,7 +82,6 @@ impl INode for Blive{
         godot_print!("Blive: Initializing");
         
         // 创建 Tokio runtime
-        let runtime_manager = RuntimeManager::new();
         
         Self { 
             code: GString::from(""),
@@ -83,9 +89,9 @@ impl INode for Blive{
             access_key_id: GString::from(""),
             access_key_secret: GString::from(""),
             api_base_url: GString::from("https://live-open.biliapi.com"),
-            runtime: Some(Arc::new(runtime_manager)),
             ws_running: Arc::new(Mutex::new(false)),
-            ws_message_rx: None,
+            thread_message_rx: None,
+            thread_message_tx: None,
             heartbeat_running: Arc::new(Mutex::new(false)),
             current_game_id: Arc::new(Mutex::new(None)),
             batch_heartbeat_running: Arc::new(Mutex::new(false)),
@@ -96,49 +102,35 @@ impl INode for Blive{
     
     fn ready(&mut self) {
         godot_print!("Blive: Ready");
-        // 启用 process 以处理 WebSocket 消息
+        
+        // 启用 process 以处理线程消息
         self.base_mut().set_process(true);
     }
     
     fn process(&mut self, _delta: f64) {
-        // 检查 WebSocket 消息
-        let message_opt = if let Some(ref rx_arc) = self.ws_message_rx {
+        // 收集所有待处理的消息
+        let messages: Vec<ThreadMessage> = if let Some(ref rx_arc) = self.thread_message_rx {
             if let Ok(mut rx) = rx_arc.lock() {
-                rx.try_recv().ok()
+                let mut msgs = Vec::new();
+                while let Ok(msg) = rx.try_recv() {
+                    msgs.push(msg);
+                }
+                msgs
             } else {
-                None
+                Vec::new()
             }
         } else {
-            None
+            Vec::new()
         };
         
         // 处理消息
-        if let Some(message) = message_opt {
-            match message {
-                WsMessage::Connected => {
-                    self.base_mut().emit_signal("ws_connected", &[]);
-                },
-                WsMessage::Disconnected => {
-                    self.base_mut().emit_signal("ws_disconnected", &[]);
-                    self.ws_message_rx = None;
-                },
-                WsMessage::Message { cmd, data } => {
-                    self.base_mut().emit_signal(
-                        "ws_message_received",
-                        &[GString::from(&cmd).to_variant(), GString::from(&data).to_variant()]
-                    );
-                },
-                WsMessage::Error(error) => {
-                    self.base_mut().emit_signal(
-                        "ws_error",
-                        &[GString::from(&error).to_variant()]
-                    );
-                },
-                WsMessage::Debug(debug) => {
-                    self.base_mut().emit_signal(
-                        "ws_debug",
-                        &[GString::from(&debug).to_variant()]
-                    );
+        for msg in messages {
+            match msg {
+                ThreadMessage::Signal { name, args } => {
+                    let variants: Vec<Variant> = args.iter()
+                        .map(|s| GString::from(s).to_variant())
+                        .collect();
+                    self.base_mut().emit_signal(&StringName::from(&name), &variants);
                 }
             }
         }
@@ -381,29 +373,23 @@ impl Blive{
         let access_key_secret = self.access_key_secret.to_string();
         let api_base_url = self.api_base_url.to_string();
         
-        // 获取实例 ID 用于发送信号
-        let instance_id = self.base().instance_id();
-        
         godot_print!("启动心跳线程...");
+        
+        // 创建或获取消息通道
+        let tx = if let Some(existing_tx) = &self.thread_message_tx {
+            existing_tx.clone()
+        } else {
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.thread_message_rx = Some(Arc::new(Mutex::new(rx)));
+            self.thread_message_tx = Some(tx.clone());
+            tx
+        };
         
         // 在独立线程中运行心跳
         std::thread::Builder::new()
             .name("heartbeat-thread".to_string())
             .spawn(move || {
-                // 发送调试信息的辅助函数
-                let send_debug = |msg: &str| {
-                    if let Ok(mut node) = Gd::<Blive>::try_from_instance_id(instance_id) {
-                        let method = StringName::from("emit_signal");
-                        let signal_name = StringName::from("heartbeat_debug");
-                        let args = vec![
-                            signal_name.to_variant(),
-                            GString::from(msg).to_variant()
-                        ];
-                        node.call_deferred(&method, &args);
-                    }
-                };
-                
-                send_debug("心跳线程已启动");
+                send_signal_to_main(&tx, "heartbeat_debug", vec!["心跳线程已启动".to_string()]);
                 
                 while *heartbeat_running.lock().unwrap() {
                     // 获取当前 game_id
@@ -413,7 +399,7 @@ impl Blive{
                     };
                     
                     if let Some(game_id) = gid {
-                        send_debug(&format!("准备发送心跳: game_id={}", game_id));
+                        send_signal_to_main(&tx, "heartbeat_debug", vec![format!("准备发送心跳: game_id={}", game_id)]);
                         
                         // 构建请求
                         let body_json = format!(r#"{{"game_id":"{}"}}"#, game_id);
@@ -437,44 +423,36 @@ impl Blive{
                         
                         let response_json = match request_builder.send() {
                             Ok(resp) => {
-                                send_debug("心跳请求已发送");
+                                send_signal_to_main(&tx, "heartbeat_debug", vec!["心跳请求已发送".to_string()]);
                                 match resp.text() {
                                     Ok(text) => {
-                                        send_debug("收到心跳响应");
+                                        send_signal_to_main(&tx, "heartbeat_debug", vec!["收到心跳响应".to_string()]);
                                         text
                                     },
                                     Err(e) => {
                                         let err_msg = format!("响应读取失败: {}", e);
-                                        send_debug(&err_msg);
+                                        send_signal_to_main(&tx, "heartbeat_debug", vec![err_msg.clone()]);
                                         format!(r#"{{"code":-1,"message":"{}"}}"#, err_msg)
                                     }
                                 }
                             },
                             Err(e) => {
                                 let err_msg = format!("请求发送失败: {}", e);
-                                send_debug(&err_msg);
+                                send_signal_to_main(&tx, "heartbeat_debug", vec![err_msg.clone()]);
                                 format!(r#"{{"code":-1,"message":"{}"}}"#, err_msg)
                             }
                         };
                         
                         // 发送信号
-                        if let Ok(mut node) = Gd::<Blive>::try_from_instance_id(instance_id) {
-                            let method = StringName::from("emit_signal");
-                            let signal_name = StringName::from("heartbeat_completed");
-                            let args = vec![
-                                signal_name.to_variant(),
-                                GString::from(&response_json).to_variant()
-                            ];
-                            node.call_deferred(&method, &args);
-                        }
+                        send_signal_to_main(&tx, "heartbeat_completed", vec![response_json.clone()]);
                     }
                     
                     // 等待 20 秒
-                    send_debug("等待 20 秒后发送下一次心跳");
+                    send_signal_to_main(&tx, "heartbeat_debug", vec!["等待 20 秒后发送下一次心跳".to_string()]);
                     std::thread::sleep(std::time::Duration::from_secs(20));
                 }
                 
-                send_debug("心跳线程结束");
+                send_signal_to_main(&tx, "heartbeat_debug", vec!["心跳线程结束".to_string()]);
             })
             .expect("Failed to spawn heartbeat thread");
         
@@ -565,29 +543,23 @@ impl Blive{
         let access_key_secret = self.access_key_secret.to_string();
         let api_base_url = self.api_base_url.to_string();
         
-        // 获取实例 ID 用于发送信号
-        let instance_id = self.base().instance_id();
-        
         godot_print!("启动批量心跳线程...");
+        
+        // 创建或获取消息通道
+        let tx = if let Some(existing_tx) = &self.thread_message_tx {
+            existing_tx.clone()
+        } else {
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.thread_message_rx = Some(Arc::new(Mutex::new(rx)));
+            self.thread_message_tx = Some(tx.clone());
+            tx
+        };
         
         // 在独立线程中运行批量心跳
         std::thread::Builder::new()
             .name("batch-heartbeat-thread".to_string())
             .spawn(move || {
-                // 发送调试信息的辅助函数
-                let send_debug = |msg: &str| {
-                    if let Ok(mut node) = Gd::<Blive>::try_from_instance_id(instance_id) {
-                        let method = StringName::from("emit_signal");
-                        let signal_name = StringName::from("heartbeat_debug");
-                        let args = vec![
-                            signal_name.to_variant(),
-                            GString::from(msg).to_variant()
-                        ];
-                        node.call_deferred(&method, &args);
-                    }
-                };
-                
-                send_debug("批量心跳线程已启动");
+                send_signal_to_main(&tx, "heartbeat_debug", vec!["批量心跳线程已启动".to_string()]);
                 
                 while *batch_heartbeat_running.lock().unwrap() {
                     // 获取当前 game_ids
@@ -597,7 +569,7 @@ impl Blive{
                     };
                     
                     if !gids.is_empty() {
-                        send_debug(&format!("准备发送批量心跳: {} 个场次", gids.len()));
+                        send_signal_to_main(&tx, "heartbeat_debug", vec![format!("准备发送批量心跳: {} 个场次", gids.len())]);
                         
                         // 构建 game_ids 数组的 JSON
                         let game_ids_json: Vec<String> = gids.iter()
@@ -626,46 +598,38 @@ impl Blive{
                         
                         let response_json = match request_builder.send() {
                             Ok(resp) => {
-                                send_debug("批量心跳请求已发送");
+                                send_signal_to_main(&tx, "heartbeat_debug", vec!["批量心跳请求已发送".to_string()]);
                                 match resp.text() {
                                     Ok(text) => {
-                                        send_debug("收到批量心跳响应");
+                                        send_signal_to_main(&tx, "heartbeat_debug", vec!["收到批量心跳响应".to_string()]);
                                         text
                                     },
                                     Err(e) => {
                                         let err_msg = format!("响应读取失败: {}", e);
-                                        send_debug(&err_msg);
+                                        send_signal_to_main(&tx, "heartbeat_debug", vec![err_msg.clone()]);
                                         format!(r#"{{"code":-1,"message":"{}"}}"#, err_msg)
                                     }
                                 }
                             },
                             Err(e) => {
                                 let err_msg = format!("请求发送失败: {}", e);
-                                send_debug(&err_msg);
+                                send_signal_to_main(&tx, "heartbeat_debug", vec![err_msg.clone()]);
                                 format!(r#"{{"code":-1,"message":"{}"}}"#, err_msg)
                             }
                         };
                         
                         // 发送信号
-                        if let Ok(mut node) = Gd::<Blive>::try_from_instance_id(instance_id) {
-                            let method = StringName::from("emit_signal");
-                            let signal_name = StringName::from("batch_heartbeat_completed");
-                            let args = vec![
-                                signal_name.to_variant(),
-                                GString::from(&response_json).to_variant()
-                            ];
-                            node.call_deferred(&method, &args);
-                        }
+                        send_signal_to_main(&tx, "batch_heartbeat_completed", vec![response_json.clone()]);
                     } else {
-                        send_debug("game_ids 为空，跳过本次心跳");
+                        send_signal_to_main(&tx, "heartbeat_debug", vec!["game_ids 为空，跳过本次心跳".to_string()]);
                     }
                     
                     // 等待 20 秒
-                    send_debug("等待 20 秒后发送下一次批量心跳");
+                    send_signal_to_main(&tx, "heartbeat_debug", vec!["等待 20 秒后发送下一次批量心跳".to_string()]);
                     std::thread::sleep(std::time::Duration::from_secs(20));
                 }
                 
-                send_debug("批量心跳线程结束");
+                send_signal_to_main(&tx, "heartbeat_debug", vec!["批量心跳线程结束".to_string()]);
             })
             .expect("Failed to spawn batch heartbeat thread");
         
@@ -769,13 +733,19 @@ impl Blive{
         let auth_body_str = auth_body.to_string();
         let ws_running = Arc::clone(&self.ws_running);
         
-        // 创建消息通道
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.ws_message_rx = Some(Arc::new(Mutex::new(rx)));
-        
         godot_print!("准备启动 WebSocket 任务...");
         godot_print!("WS URL: {}", ws_url_str);
         godot_print!("Auth body 长度: {}", auth_body_str.len());
+        
+        // 创建或获取消息通道
+        let tx = if let Some(existing_tx) = &self.thread_message_tx {
+            existing_tx.clone()
+        } else {
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.thread_message_rx = Some(Arc::new(Mutex::new(rx)));
+            self.thread_message_tx = Some(tx.clone());
+            tx
+        };
         
         // 使用 std::thread 启动一个新线程，在其中运行 Tokio runtime
         godot_print!("启动独立线程...");
@@ -783,56 +753,75 @@ impl Blive{
         let spawn_result = std::thread::Builder::new()
             .name("websocket-thread".to_string())
             .spawn(move || {
-            let _ = tx.send(WsMessage::Debug("线程已启动".to_string()));
+            // 辅助宏
+            macro_rules! send_debug {
+                ($msg:expr) => {
+                    send_signal_to_main(&tx, "ws_debug", vec![$msg.to_string()]);
+                };
+            }
+            
+            macro_rules! send_error {
+                ($msg:expr) => {
+                    send_signal_to_main(&tx, "ws_error", vec![$msg.to_string()]);
+                };
+            }
+            
+            macro_rules! emit_signal {
+                ($name:expr, $($arg:expr),*) => {
+                    send_signal_to_main(&tx, $name, vec![$($arg.to_string()),*]);
+                };
+            }
+            
+            send_debug!("线程已启动");
             
             // 在这个线程中创建一个新的 Tokio runtime
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => {
-                    let _ = tx.send(WsMessage::Debug("Tokio runtime 创建成功".to_string()));
+                    send_debug!("Tokio runtime 创建成功");
                     rt
                 },
                 Err(e) => {
-                    let _ = tx.send(WsMessage::Error(format!("创建 runtime 失败: {}", e)));
+                    send_error!(&format!("创建 runtime 失败: {}", e));
                     return;
                 }
             };
             
             rt.block_on(async move {
-            let _ = tx.send(WsMessage::Debug(format!("开始连接 WebSocket: {}", ws_url_str)));
+            send_debug!(&format!("开始连接 WebSocket: {}", ws_url_str));
             
             // 连接 WebSocket
             let ws_stream = match connect_async(&ws_url_str).await {
                 Ok((stream, _)) => {
-                    let _ = tx.send(WsMessage::Debug("WebSocket 连接成功".to_string()));
+                    send_debug!("WebSocket 连接成功");
                     stream
                 },
                 Err(e) => {
-                    let _ = tx.send(WsMessage::Error(format!("连接失败: {}", e)));
+                    send_error!(&format!("连接失败: {}", e));
                     *ws_running.lock().unwrap() = false;
                     return;
                 }
             };
             
-            let _ = tx.send(WsMessage::Connected);
+            emit_signal!("ws_connected",);
             
             let (mut write, mut read) = ws_stream.split();
             
             // 发送鉴权包
-            let _ = tx.send(WsMessage::Debug("准备发送鉴权包".to_string()));
+            send_debug!("准备发送鉴权包");
             let auth_packet = Self::encode_packet(OP_AUTH, auth_body_str.as_bytes());
             if let Err(e) = write.send(Message::Binary(auth_packet)).await {
-                let _ = tx.send(WsMessage::Error(format!("鉴权失败: {}", e)));
+                send_error!(&format!("鉴权失败: {}", e));
                 *ws_running.lock().unwrap() = false;
                 return;
             }
-            let _ = tx.send(WsMessage::Debug("鉴权包已发送".to_string()));
+            send_debug!("鉴权包已发送");
             
             // 启动心跳任务
-            let _ = tx.send(WsMessage::Debug("启动心跳任务".to_string()));
+            send_debug!("启动心跳任务");
             let ws_running_heartbeat = Arc::clone(&ws_running);
             let tx_heartbeat = tx.clone();
             tokio::spawn(async move {
-                let _ = tx_heartbeat.send(WsMessage::Debug("心跳任务已启动".to_string()));
+                send_signal_to_main(&tx_heartbeat, "ws_debug", vec!["心跳任务已启动".to_string()]);
                 let mut interval = tokio::time::interval(Duration::from_secs(20));
                 
                 loop {
@@ -844,16 +833,16 @@ impl Blive{
                     
                     let heartbeat_packet = Self::encode_packet(OP_HEARTBEAT, &[]);
                     if let Err(e) = write.send(Message::Binary(heartbeat_packet)).await {
-                        let _ = tx_heartbeat.send(WsMessage::Error(format!("心跳失败: {}", e)));
+                        send_signal_to_main(&tx_heartbeat, "ws_error", vec![format!("心跳失败: {}", e)]);
                         break;
                     }
-                    let _ = tx_heartbeat.send(WsMessage::Debug("心跳包已发送".to_string()));
+                    send_signal_to_main(&tx_heartbeat, "ws_debug", vec!["心跳包已发送".to_string()]);
                 }
-                let _ = tx_heartbeat.send(WsMessage::Debug("心跳任务结束".to_string()));
+                send_signal_to_main(&tx_heartbeat, "ws_debug", vec!["心跳任务结束".to_string()]);
             });
             
             // 接收消息循环
-            let _ = tx.send(WsMessage::Debug("开始接收消息循环".to_string()));
+            send_debug!("开始接收消息循环");
             while let Some(msg_result) = read.next().await {
                 if !*ws_running.lock().unwrap() {
                     break;
@@ -866,10 +855,10 @@ impl Blive{
                                 for (operation, body) in packets {
                                     match operation {
                                         OP_AUTH_REPLY => {
-                                            let _ = tx.send(WsMessage::Debug("收到鉴权回复".to_string()));
+                                            send_debug!("收到鉴权回复");
                                         },
                                         OP_HEARTBEAT_REPLY => {
-                                            let _ = tx.send(WsMessage::Debug("收到心跳回复".to_string()));
+                                            send_debug!("收到心跳回复");
                                         },
                                         OP_SEND_SMS_REPLY => {
                                             if let Ok(text) = String::from_utf8(body) {
@@ -880,39 +869,36 @@ impl Blive{
                                                         .unwrap_or("UNKNOWN")
                                                         .to_string();
                                                     
-                                                    let _ = tx.send(WsMessage::Debug(format!("收到消息: {}", cmd)));
-                                                    let _ = tx.send(WsMessage::Message {
-                                                        cmd,
-                                                        data: text,
-                                                    });
+                                                    send_debug!(&format!("收到消息: {}", cmd));
+                                                    send_signal_to_main(&tx, "ws_message_received", vec![cmd.clone(), text.clone()]);
                                                 }
                                             }
                                         },
                                         _ => {
-                                            let _ = tx.send(WsMessage::Debug(format!("收到未知操作码: {}", operation)));
+                                            send_debug!(&format!("收到未知操作码: {}", operation));
                                         }
                                     }
                                 }
                             },
                             Err(e) => {
-                                let _ = tx.send(WsMessage::Debug(format!("解码包失败: {}", e)));
+                                send_debug!(&format!("解码包失败: {}", e));
                             }
                         }
                     },
                     Ok(Message::Close(_)) => {
-                        let _ = tx.send(WsMessage::Debug("收到关闭消息".to_string()));
+                        send_debug!("收到关闭消息");
                         break;
                     },
                     Err(e) => {
-                        let _ = tx.send(WsMessage::Error(format!("接收失败: {}", e)));
+                        send_error!(&format!("接收失败: {}", e));
                         break;
                     },
                     _ => {}
                 }
             }
             
-            let _ = tx.send(WsMessage::Debug("消息循环结束".to_string()));
-            let _ = tx.send(WsMessage::Disconnected);
+            send_debug!("消息循环结束");
+            emit_signal!("ws_disconnected",);
             *ws_running.lock().unwrap() = false;
             });
         });

@@ -6,3 +6,8 @@ reloadable = true
 [libraries]
 windows.debug.x86_64 = "res://addons/gdblive/GDBLive.windows.x86_64.dll"
 windows.release.x86_64 = "res://addons/gdblive/GDBLive.windows.x86_64.dll"
+
+
+[icons]
+Blive = "res://addons/gdblive/icon.svg"
+
