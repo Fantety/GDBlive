@@ -102,10 +102,8 @@ jobs:
         run: |
           mkdir -p release/addons/gdblive
           
-          # Copy gdextension file and plugin.cfg
+          # Copy gdextension file
           cp demo/addons/gdblive/gdblive.gdextension release/addons/gdblive/
-          cp demo/addons/gdblive/plugin.cfg release/addons/gdblive/
-          cp demo/addons/gdblive/icon.svg release/addons/gdblive/
           
           # Copy Windows binary
           if [ -f artifacts/gdblive-windows/GDBLive.dll ]; then
@@ -254,20 +252,10 @@ jobs:
             mv addons/gdblive/libgdblive.arm64.dylib addons/gdblive/libgdblive.macos.framework
           fi
           
-          # Copy gdextension and plugin files to addons/gdblive if they don't exist
+          # Copy gdextension file to addons/gdblive if it doesn't exist
           if [ ! -f addons/gdblive/gdblive.gdextension ] && [ -f demo/addons/gdblive/gdblive.gdextension ]; then
             cp demo/addons/gdblive/gdblive.gdextension addons/gdblive/
             echo "✓ Copied gdextension file"
-          fi
-          
-          if [ ! -f addons/gdblive/plugin.cfg ] && [ -f demo/addons/gdblive/plugin.cfg ]; then
-            cp demo/addons/gdblive/plugin.cfg addons/gdblive/
-            echo "✓ Copied plugin.cfg"
-          fi
-          
-          if [ ! -f addons/gdblive/icon.svg ] && [ -f demo/addons/gdblive/icon.svg ]; then
-            cp demo/addons/gdblive/icon.svg addons/gdblive/
-            echo "✓ Copied icon.svg"
           fi
 
       - name: Commit and push binaries
@@ -278,7 +266,7 @@ jobs:
           # Add binaries from both locations
           git add demo/addons/gdblive/*.dll demo/addons/gdblive/*.so demo/addons/gdblive/*.framework 2>/dev/null || true
           git add addons/gdblive/*.dll addons/gdblive/*.so addons/gdblive/*.framework 2>/dev/null || true
-          git add addons/gdblive/*.gdextension addons/gdblive/plugin.cfg addons/gdblive/icon.svg 2>/dev/null || true
+          git add addons/gdblive/*.gdextension 2>/dev/null || true
           
           if git diff --staged --quiet; then
             echo "No changes to commit"
