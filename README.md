@@ -38,7 +38,7 @@ GDBLive 是一个 Godot 4 插件，让你可以在游戏中接收 B站直播间�
 
 ### 第一步：安装插件
 
-1. 从 [Releases](https://github.com/your-repo/releases) 下载最新版本
+1. 从 [Releases](https://github.com/GDBlive) 下载最新版本
 2. 解压到你的 Godot 项目的 `addons/` 目录
 3. 在 Godot 编辑器中启用插件：`项目 → 项目设置 → 插件 → GDBLive`
 
@@ -59,19 +59,10 @@ GDBLive 是一个 Godot 4 插件，让你可以在游戏中接收 B站直播间�
 ```gdscript
 extends Node
 
-var blive: Blive
-var game_id: String = ""
+# 创建Blive节点
+@onready var blive = $Blive
 
 func _ready():
-    # 创建 Blive 节点
-    blive = Blive.new()
-    add_child(blive)
-    
-    # 填入你的 API 凭证
-    blive.code = "你的身份码"
-    blive.app_id = "你的应用ID"
-    blive.access_key_id = "你的密钥ID"
-    blive.access_key_secret = "你的密钥"
     
     # 连接信号
     blive.start_completed.connect(_on_start_completed)
@@ -95,10 +86,10 @@ func _on_start_completed(response_json: String):
         var ws_url = ws_info["wss_link"][0]
         var auth_body = ws_info["auth_body"]
         
-        # 连接 WebSocket
+        # 连接 WebSocket（会自动维持ws心跳）
         blive.start_websocket(ws_url, auth_body)
         
-        # 启动心跳（保持连接）
+        # 启动App心跳（保持连接）
         blive.start_heartbeat(game_id)
         
         print("✓ 连接成功！等待接收消息...")
@@ -204,17 +195,36 @@ blive.stop_heartbeat()
 ```json
 {
   "code": 0,
+  "message": "ok",
   "data": {
+    //  场次信息
     "game_info": {
-      "game_id": "场次ID"
+      //  场次id,心跳key(推荐心跳保持20s)调用一次,互动玩法超过60秒，H5插件和工具超过180s无心跳自动关闭,长连停止推送消息
+      "game_id": ""
     },
+    //  长连信息
     "websocket_info": {
-      "wss_link": ["WebSocket地址"],
-      "auth_body": "鉴权字符串"
+      //  长连使用的请求json体 第三方无需关注内容,建立长连时使用即可
+      "auth_body": "",
+      //  wss 长连地址，返回多个不同集群的地址，默认使用第一个即可，用于生产环境请做好连接失败后切换集群的兜底逻辑
+      "wss_link": [
+        ""
+      ]
     },
+    //  主播信息
     "anchor_info": {
-      "uname": "主播昵称",
-      "room_id": 房间号
+      // 主播房间号
+      "room_id": 0,
+      // 主播昵称
+      "uname": "",
+      // 主播头像
+      "uface": "",
+      // 主播uid
+      "uid": 0
+      //用户唯一标识
+      "open_id":"39b8fedb-60a5-4e29-ac75-b16955f7e632",
+      //开发者维度下用户唯一标识
+      "union_id":"U_ed2cbbb8-2c8f-4fcd-bc47-b62f0e1fca75",
     }
   }
 }
@@ -229,6 +239,11 @@ blive.stop_heartbeat()
 - `LIVE_OPEN_PLATFORM_SUPER_CHAT` - SC
 - `LIVE_OPEN_PLATFORM_GUARD` - 上舰
 - `LIVE_OPEN_PLATFORM_LIKE` - 点赞
+- `LIVE_OPEN_PLATFORM_LIVE_START` - 离开房间
+- `LIVE_OPEN_PLATFORM_LIVE_END` -  结束直播
+- `LIVE_OPEN_PLATFORM_INTERACTION_END` - 消息推送结束通知
+- `LIVE_OPEN_PLATFORM_LIVE_START` - 开始直播
+- `LIVE_OPEN_PLATFORM_LIVE_ROOM_ENTER` - 进入直播间
 
 **弹幕消息数据结构：**
 ```json
